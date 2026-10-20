@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Medidor de BPM pela câmera</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--fg:#f2f2f2;--mut:#9aa0a6;--acc:#ff4d5e}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:env(safe-area-inset-top) 16px 24px}
+h1{font-size:1.3rem;margin:16px 0 4px}p{color:var(--mut);font-size:.9rem;line-height:1.4}
+.card{background:var(--card);border-radius:16px;padding:16px;margin:12px 0}
+.modes{display:flex;gap:8px}.modes button{flex:1}
+button{font:inherit;border:0;border-radius:12px;padding:14px;background:#2a2f3a;color:var(--fg)}
+button.on{background:var(--acc)}#go{width:100%;background:var(--acc);font-weight:600;font-size:1.1rem}
+#bpm{font-size:4rem;font-weight:700;text-align:center;margin:0}#bpm small{font-size:1rem;color:var(--mut)}
+#status{text-align:center;min-height:1.4em}#q{height:8px;border-radius:4px;background:#333;overflow:hidden}#qb{height:100%;width:0;background:#e33;transition:.3s}
+canvas#wave{width:100%;height:120px;display:block}video{width:72px;height:72px;object-fit:cover;border-radius:50%;float:right;background:#000}
+.disc{font-size:.8rem;color:var(--mut)}
+</style></head><body>
+<h1>❤️ Medidor de BPM</h1>
+<p>Estimativa da frequência cardíaca pela câmera (fotopletismografia).</p>
+<div class="card"><div class="modes"><button id="mF" class="on">Dedo (traseira)</button><button id="mR">Rosto (frontal)</button></div>
+<p id="howto">Cubra totalmente a câmera traseira com a ponta do dedo, sem apertar. Fique em um lugar bem iluminado e parado.</p>
+<button id="go">Começar medição</button></div>
+<div class="card"><video id="v" playsinline muted></video>
+<p id="bpm">--<small> BPM</small></p><p id="status">Pronto.</p>
+<div id="q"><div id="qb"></div></div><canvas id="wave" width="600" height="120"></canvas></div>
+<p class="disc"><b>Aviso:</b> isto é uma estimativa e não é um dispositivo médico. Sem o flash (o Safari não permite ligá-lo), a precisão cai bastante. Fique parado, em boa luz. Nenhum dado sai do seu aparelho: todo o processamento é feito localmente.</p>
+<canvas id="c" width="64" height="64" hidden></canvas>
+<script>
+const $=id=>document.getElementById(id),DUR=25;let mode='finger',stream,run=false;
+$('mF').onclick=()=>setMode('finger');$('mR').onclick=()=>setMode('face');
+function setMode(m){if(run)return;mode=m;$('mF').classList.toggle('on',m=='finger');$('mR').classList.toggle('on',m=='face');
+$('howto').textContent=m=='finger'?'Cubra totalmente a câmera traseira com a ponta do dedo, sem apertar. Fique em um lugar bem iluminado e parado.':'Posicione o rosto bem iluminado (luz de frente), centralizado e parado. Evite falar ou mexer.';}
+$('go').onclick=()=>run?stop('Medição cancelada.'):start();
+function stop(msg){run=false;if(stream)stream.getTracks().forEach(t=>t.stop());$('go').textContent='Começar medição';if(msg)$('status').textContent=msg;}
+async function start(){
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:mode=='finger'?'environment':'user',width:{ideal:640},height:{ideal:480}},audio:false});}
+ catch(e){$('status').textContent='Não foi possível acessar a câmera: '+e.message;return;}
+ const tr=stream.getVideoTracks()[0];if(mode=='finger'){try{await tr.applyConstraints({advanced:[{torch:true}]});}catch(e){}}
+ const v=$('v');v.srcObject=stream;await v.play();run=true;$('go').textContent='Parar';$('bpm').innerHTML='--<small> BPM</small>';
+ const c=$('c'),x=c.getContext('2d',{willReadFrequently:true});const ts=[],vs=[];let t0=null,last=0;
+ function frame(){if(!run)return;const now=performance.now();
+  const W=v.videoWidth,H=v.videoHeight;if(W){let sx,sy,sw,sh;
+   if(mode=='finger'){sw=W*.5;sh=H*.5;sx=(W-sw)/2;sy=(H-sh)/2}else{sw=W*.3;sh=H*.12;sx=(W-sw)/2;sy=H*.2}
+   x.drawImage(v,sx,sy,sw,sh,0,0,64,64);const d=x.getImageData(0,0,64,64).data;let r=0,g=0,b=0,n=d.length/4;
+   for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2]}r/=n;g/=n;b/=n;
+   const val=mode=='finger'?r:g,q=quality(r,g,b);
+   if(q.ok){if(t0===null)t0=now;ts.push((now-t0)/1000);vs.push(val)}else if(t0!==null&&mode=='finger'&&ts.length){ts.length=0;vs.length=0;t0=null}
+   const el=t0===null?0:(now-t0)/1000;$('status').textContent=q.ok?`Medindo... ${Math.max(0,Math.ceil(DUR-el))}s`:q.msg;
+   if(now-last>500&&ts.length>90){last=now;const e=estimate(ts,vs);drawWave(e.f);
+    if(e.bpm){$('bpm').innerHTML=Math.round(e.bpm)+'<small> BPM</small>';setQ(e.conf)}}
+   else if(ts.length>2&&now-last>100)drawWave(vs.slice(-150).map((a,i,s)=>a-s[0]));
+   if(el>=DUR){const e=estimate(ts,vs);stop(e.bpm&&e.conf>.3?`Resultado: ~${Math.round(e.bpm)} BPM (confiança ${Math.round(e.conf*100)}%)`:'Sinal fraco demais. Tente de novo com mais luz e parado.');if(e.bpm)$('bpm').innerHTML=Math.round(e.bpm)+'<small> BPM</small>';return}}
+  requestAnimationFrame(frame)}
+ requestAnimationFrame(frame);}
+function quality(r,g,b){if(mode=='finger'){if(r<40)return{ok:false,msg:'Muito escuro: cubra a câmera e busque mais luz.'};
+ if(r>253&&g>250)return{ok:false,msg:'Saturado: alivie a pressão do dedo.'};if(r<g*1.3)return{ok:false,msg:'Cubra a câmera inteira com o dedo.'};return{ok:true}}
+ if(g<30)return{ok:false,msg:'Pouca luz no rosto.'};if(g>245)return{ok:false,msg:'Luz forte demais.'};return{ok:true}}
+function setQ(c){$('qb').style.width=Math.round(c*100)+'%';$('qb').style.background=c>.6?'#3c6':c>.3?'#eb3':'#e33'}
+// reamostra a 30Hz, remove tendência, filtra 0.7-3.5Hz, espectro por DFT
+function estimate(ts,vs){const fs=30,T=ts[ts.length-1],N=Math.floor(T*fs);if(N<60)return{f:[]};
+ const y=new Float64Array(N);let j=0;for(let i=0;i<N;i++){const t=i/fs;while(j<ts.length-2&&ts[j+1]<t)j++;const a=(t-ts[j])/((ts[j+1]-ts[j])||1);y[i]=vs[j]+(vs[j+1]-vs[j])*Math.max(0,Math.min(1,a))}
+ const w=Math.round(fs*1.5),z=new Float64Array(N);for(let i=0;i<N;i++){let s=0,c=0;for(let k=Math.max(0,i-w);k<=Math.min(N-1,i+w);k++){s+=y[k];c++}z[i]=y[i]-s/c}
+ const f=bp(bp(z,fs,.7,'hp'),fs,3.5,'lp');let best=0,bf=0,tot=0;
+ for(let bpm=42;bpm<=210;bpm+=.5){const fr=bpm/60;let re=0,im=0;for(let i=0;i<N;i++){const h=.5-.5*Math.cos(2*Math.PI*i/N),ph=2*Math.PI*fr*i/fs;re+=f[i]*h*Math.cos(ph);im+=f[i]*h*Math.sin(ph)}const p=re*re+im*im;tot+=p;if(p>best){best=p;bf=bpm}}
+ const conf=Math.min(1,best/(tot/337)/25);return{bpm:bf,conf,f:Array.from(f.slice(-150))}}
+function bp(x,fs,fc,type){// biquad Butterworth 2a ordem
+ const w=2*Math.PI*fc/fs,cs=Math.cos(w),al=Math.sin(w)/Math.SQRT2;let b0,b1,b2;
+ if(type=='lp'){b0=(1-cs)/2;b1=1-cs;b2=b0}else{b0=(1+cs)/2;b1=-(1+cs);b2=b0}const a0=1+al,a1=-2*cs,a2=1-al;
+ const o=new Float64Array(x.length);let x1=0,x2=0,y1=0,y2=0;for(let i=0;i<x.length;i++){const v=(b0*x[i]+b1*x1+b2*x2-a1*y1-a2*y2)/a0;x2=x1;x1=x[i];y2=y1;y1=v;o[i]=v}return o}
+function drawWave(a){const c=$('wave'),g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);if(a.length<2)return;
+ let mn=Math.min(...a),mx=Math.max(...a);if(mx-mn<1e-6)mx=mn+1;g.strokeStyle='#ff4d5e';g.lineWidth=3;g.beginPath();
+ a.forEach((v,i)=>{const X=i/(a.length-1)*c.width,Y=c.height-8-(v-mn)/(mx-mn)*(c.height-16);i?g.lineTo(X,Y):g.moveTo(X,Y)});g.stroke()}
+</script></body></html>
